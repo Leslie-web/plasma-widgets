@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Bridge cava's raw ASCII frames to a tiny read-only HTTP endpoint.
+
+Plasma applets cannot stream a long-lived child process from QML (the
+`executable` dataengine only reads stdout after the process exits), so this
+helper owns cava and republishes the newest frame for the
+org.leslie.nowplaying applet to poll.
+
+Endpoints (bound to 127.0.0.1 only):
+    GET /frame   -> {"t": <epoch ms>, "b": [<int>, ...], "fps": <float>}
+    GET /status  -> {"cava": <bool>, "binary": ..., "config": ..., ...}
+
+Environment overrides:
+    PLASMA_WAVEFORM_PORT        first port to try (scans 10 upward; default 8765)
+    PLASMA_WAVEFORM_CAVA        path to the cava binary
+    PLASMA_WAVEFORM_CAVA_CONF   path to the cava config file
+
+The cava config bundled next to this script is used when present, so the
+package works without anything in ~/.config/cava.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+from collections import deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Optional
+
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("PLASMA_WAVEFORM_PORT", "8765"))
+# The applet probes this many ports upward from the hint, so a busy port is not
+# fatal. Both sides use the same window.
+PORT_SPAN = 10
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_BUNDLED_CONF = os.path.join(_HERE, "cava.conf")
+CAVA_CONF = os.environ.get(
+    "PLASMA_WAVEFORM_CAVA_CONF",
+    _BUNDLED_CONF
+    if os.path.exists(_BUNDLED_CONF)
+    else os.path.expanduser("~/.config/cava/plasma-waveform.conf"),
+)
+RESTART_DELAY = 2.0
+MISSING_BINARY_DELAY = 10.0
+
+_state_lock = threading.Lock()
+_state = {"t": 0, "b": [], "fps": 0.0, "s": 0}
+# Recent frames, so the applet can fetch a batch instead of polling per frame
+# (each XHR costs the shell several milliseconds).
+_frames = deque(maxlen=240)
+_seq = 0
+_stop = threading.Event()
+_proc: Optional[subprocess.Popen] = None
+
+
+def cava_binary() -> Optional[str]:
+    return os.environ.get("PLASMA_WAVEFORM_CAVA") or shutil.which("cava")
+
+
+def publish(bars, fps: float) -> None:
+    global _state, _seq
+    with _state_lock:
+        if bars:
+            _seq += 1
+            _frames.append(bars)
+        _state = {
+            "t": int(time.time() * 1000),
+            "b": bars,
+            "fps": round(fps, 1),
+            "s": _seq,
+        }
+
+
+def read_frames(proc: subprocess.Popen) -> None:
+    """Consume cava stdout: one line per frame, values joined by ';'."""
+    stamps = []
+    for raw in iter(proc.stdout.readline, b""):
+        if _stop.is_set():
+            break
+        line = raw.decode("ascii", "ignore").strip()
+        if not line:
+            continue
+        try:
+            bars = [int(value) for value in line.split(";") if value]
+        except ValueError:
+            continue
+        if not bars:
+            continue
+        now = time.monotonic()
+        stamps.append(now)
+        cutoff = now - 2.0
+        stamps = [stamp for stamp in stamps if stamp >= cutoff]
+        publish(bars, len(stamps) / 2.0)
+
+
+def supervise() -> None:
+    global _proc
+    while not _stop.is_set():
+        binary = cava_binary()
+        if binary is None:
+            publish([], 0.0)
+            _stop.wait(MISSING_BINARY_DELAY)
+            continue
+
+        try:
+            _proc = subprocess.Popen(
+                [binary, "-p", CAVA_CONF],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+        except OSError as exc:
+            print(f"plasma-waveform: cannot start cava: {exc}", file=sys.stderr, flush=True)
+            publish([], 0.0)
+            _stop.wait(MISSING_BINARY_DELAY)
+            continue
+
+        read_frames(_proc)
+        _proc.wait()
+        _proc = None
+        publish([], 0.0)
+        if _stop.is_set():
+            break
+        _stop.wait(RESTART_DELAY)
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "plasma-waveform/1.0"
+
+    def send_json(self, payload) -> None:
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        # QML's XMLHttpRequest is cross-origin relative to the applet package
+        # and enforces CORS, so the applet cannot read this without the header.
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        path = self.path.split("?", 1)[0]
+        if path == "/frame":
+            with _state_lock:
+                payload = dict(_state)
+            self.send_json(payload)
+        elif path == "/frames":
+            count = 8
+            if "?" in self.path:
+                for part in self.path.split("?", 1)[1].split("&"):
+                    if part.startswith("n="):
+                        try:
+                            count = max(1, min(60, int(part[2:])))
+                        except ValueError:
+                            pass
+            with _state_lock:
+                chunk = list(_frames)[-count:]
+                tail = _seq
+                stamp = _state["t"]
+            self.send_json({"t": stamp, "s": tail, "f": chunk})
+        elif path == "/status":
+            proc = _proc
+            # The applet scans a range of ports and identifies the service by
+            # this payload rather than assuming whatever answers is us.
+            self.send_json(
+                {
+                    "app": "plasma-waveform",
+                    "cava": proc is not None and proc.poll() is None,
+                    "binary": cava_binary(),
+                    "config": CAVA_CONF,
+                    "configExists": os.path.exists(CAVA_CONF),
+                    "port": self.server.server_address[1],
+                }
+            )
+        else:
+            self.send_error(404, "not found")
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+_server: Optional[ThreadingHTTPServer] = None
+# Held for the lifetime of the process; see acquire_single_instance().
+_lock_handle = None
+
+
+def acquire_single_instance() -> bool:
+    """Take an exclusive lock so repeated launches are harmless.
+
+    The applet starts this helper on demand and cannot tell whether one is
+    already running (a process-name check matches the shell that launched it),
+    so the helper owns that decision instead.
+    """
+    global _lock_handle
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    path = os.path.join(runtime, f"plasma-waveform-{os.getuid()}.lock")
+    handle = open(path, "w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    handle.write(str(os.getpid()))
+    handle.flush()
+    _lock_handle = handle
+    return True
+
+
+def bind_server() -> ThreadingHTTPServer:
+    """Bind the first free port in the window the applet scans."""
+    last_error: Optional[OSError] = None
+    for offset in range(PORT_SPAN):
+        try:
+            return ThreadingHTTPServer((HOST, PORT + offset), Handler)
+        except OSError as exc:
+            last_error = exc
+    raise last_error if last_error is not None else OSError("no port available")
+
+
+def main() -> int:
+    global _server
+
+    if not acquire_single_instance():
+        print("plasma-waveform: already running", file=sys.stderr, flush=True)
+        return 0
+
+    def on_signal(*_args) -> None:
+        _stop.set()
+        proc = _proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+        # shutdown() blocks until serve_forever() returns, so it must never be
+        # called from the thread that is currently inside serve_forever().
+        server = _server
+        if server is not None:
+            threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+
+    threading.Thread(target=supervise, name="cava-supervisor", daemon=True).start()
+
+    _server = bind_server()
+    _server.daemon_threads = True
+    print(f"plasma-waveform: http://{HOST}:{_server.server_address[1]}/frame", flush=True)
+    try:
+        _server.serve_forever(poll_interval=0.5)
+    finally:
+        _stop.set()
+        _server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

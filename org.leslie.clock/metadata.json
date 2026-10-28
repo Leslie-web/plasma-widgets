@@ -1,0 +1,18 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Leslie"
+            }
+        ],
+        "Category": "Date and Time",
+        "Description": "Day of week, date and clock that follow the wallpaper behind them",
+        "Icon": "view-calendar",
+        "Id": "org.leslie.clock",
+        "License": "MIT",
+        "Name": "Day & Date",
+        "Version": "0.1.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

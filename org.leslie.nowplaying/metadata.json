@@ -1,0 +1,18 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Leslie"
+            }
+        ],
+        "Category": "Multimedia",
+        "Description": "Current track, transport controls and a live cava waveform",
+        "Icon": "media-playback-start",
+        "Id": "org.leslie.nowplaying",
+        "License": "MIT",
+        "Name": "Now Playing",
+        "Version": "0.1.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
