@@ -3,16 +3,19 @@
     "KPlugin": {
         "Authors": [
             {
+                "Email": "lesliethirteen777@gmail.com",
                 "Name": "Leslie"
             }
         ],
+        "BugReportUrl": "https://github.com/Leslie-web/plasma-widgets/issues",
         "Category": "Date and Time",
         "Description": "Day of week, date and clock that follow the wallpaper behind them",
         "Icon": "view-calendar",
         "Id": "org.leslie.clock",
         "License": "MIT",
         "Name": "Day & Date",
-        "Version": "0.1.0"
+        "Version": "0.1.0",
+        "Website": "https://github.com/Leslie-web/plasma-widgets"
     },
     "X-Plasma-API-Minimum-Version": "6.0"
 }

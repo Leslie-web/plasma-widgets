@@ -3,16 +3,19 @@
     "KPlugin": {
         "Authors": [
             {
+                "Email": "lesliethirteen777@gmail.com",
                 "Name": "Leslie"
             }
         ],
+        "BugReportUrl": "https://github.com/Leslie-web/plasma-widgets/issues",
         "Category": "Multimedia",
         "Description": "Current track, transport controls and a live cava waveform",
         "Icon": "media-playback-start",
         "Id": "org.leslie.nowplaying",
         "License": "MIT",
         "Name": "Now Playing",
-        "Version": "0.1.0"
+        "Version": "0.1.0",
+        "Website": "https://github.com/Leslie-web/plasma-widgets"
     },
     "X-Plasma-API-Minimum-Version": "6.0"
 }
