@@ -40,3 +40,14 @@ systemctl --user restart plasma-plasmashell
 ## Licence
 
 MIT, see `LICENSE` in each package.
+
+## Artwork
+
+- `artwork/logo-{clock,nowplaying}.svg` — the two marks, plus 512/256 px PNG
+  exports. Regenerate with `python3 artwork/make-logos.py`. The fonts are
+  Inter only (SIL OFL); the Anurati font used by the clock is free for personal
+  use and must not be committed.
+- `artwork/screenshots/` — five listing images per widget, one per stock
+  wallpaper, captured by `artwork/capture-screenshots.sh`. It restarts the shell
+  five times, derives the crop from the applets' live geometry and restores the
+  previous wallpaper on exit.
